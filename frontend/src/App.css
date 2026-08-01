@@ -1,0 +1,68 @@
+/* Remove old layout restrictions */
+body {
+  margin: 0;
+  padding: 0;
+  width: 100% !important;
+  /* height: auto; */
+}
+
+/* Remove Vite's boxed layout */
+#root {
+  width: 100% !important;
+  max-width: 100% !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  text-align: left !important;
+  min-height: 100vh;
+}
+
+/* Remove footer breaking behavior */
+footer {
+  position: static !important;
+  width: 100% !important;
+  margin-top: 0 !important;
+}
+
+/* Optional: keep card styling for other components */
+.card {
+  padding: 2em;
+}
+
+/* Remove unnecessary Vite animations */
+.logo,
+.read-the-docs {
+  all: unset;
+}
+
+.hover-scale:hover {
+  transform: scale(1.02);
+}
+
+/* :root {
+  --bg: #f5f7fb;
+  --text: #1a1a1a;
+  --card: white;
+  --sidebar: white;
+  --primary: #2c3e90;
+} */
+
+:root {
+  --bg: #030303;
+  --text: #ffffff;
+  --card: #0d0d0d;
+  --sidebar: #0d0d0d;
+  --primary: #6366f1;
+}
+
+.dark-mode {
+  --bg: #0d1117;
+  --text: #e6edf3;
+  --card: #161b22;
+  --sidebar: #1c2228;
+  --primary: #58a6ff;
+}
+
+/* smooth transitions */
+body, .dashboard-wrapper {
+  transition: background 0.3s ease, color 0.3s ease;
+}

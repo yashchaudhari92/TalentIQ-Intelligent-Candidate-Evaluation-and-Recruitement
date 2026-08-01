@@ -1,0 +1,17 @@
+python
+java
+javascript
+react
+node.js
+c++
+machine learning
+deep learning
+sql
+mongodb
+html
+css
+docker
+kubernetes
+aws
+azure
+git

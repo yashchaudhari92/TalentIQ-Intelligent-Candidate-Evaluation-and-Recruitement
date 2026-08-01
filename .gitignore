@@ -1,0 +1,33 @@
+# Node
+**/node_modules/
+
+# Environment
+**/.env
+**/.env.local
+
+# Uploads
+backend/uploads/
+uploads/
+
+# Build
+**/dist/
+
+# Zip
+*.zip
+
+# Logs
+*.log
+
+# Python
+__pycache__/
+*.pyc
+
+# VS Code
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Personal
+cmd.txt
