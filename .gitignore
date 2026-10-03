@@ -1,33 +1,31 @@
+# Environment files
+.env
+.env.*
+
 # Node
-**/node_modules/
+node_modules/
 
-# Environment
-**/.env
-**/.env.local
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
 
-# Uploads
-backend/uploads/
-uploads/
-
-# Build
-**/dist/
-
-# Zip
-*.zip
+# Build files
+dist/
+build/
 
 # Logs
 *.log
 
-# Python
-__pycache__/
-*.pyc
-
-# VS Code
-.vscode/
-
-# OS
+# OS files
 .DS_Store
 Thumbs.db
 
-# Personal
+# Uploads / test data
+uploads/
+backend/uploads/
+
+# Local files
 cmd.txt
+project-structure.txt

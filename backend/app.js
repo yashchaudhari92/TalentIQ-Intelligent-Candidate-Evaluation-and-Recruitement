@@ -23,7 +23,12 @@ const mailRoutes = require("./routes/mailRoutes.js");
 
 dotenv.config();
 
-app.use(cors());
+app.use(cors({
+    origin: [
+        "http://localhost:5173"
+    ],
+    credentials: true
+}));
 app.use(express.json());
 app.use(morgan('dev'));
 app.use('/uploads', express.static(path.join(__dirname, 'uploads'))); // Serve static files from uploads folder
