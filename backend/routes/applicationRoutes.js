@@ -3,25 +3,69 @@ const router = express.Router();
 
 const multer = require("multer");
 const FormData = require("form-data");
-const fs = require("fs");
 const axios = require("axios");
+const cloudinary = require("../config/cloudinary.js");
 
 const Application = require("../models/Application");
 const Job = require("../models/Job");
 const Candidate = require("../models/Candidate");
 const Message = require("../models/Message");
-const calculateFitScore = require("../utils/calculateFitScore")
+const calculateFitScore = require("../utils/calculateFitScore");
 
 const { protect, authorizeRoles } = require("../middleware/authMiddleware");
 
+
 // --------------------------------------------
-//  MULTER CONFIG
+//  MULTER CONFIGURATION
 // --------------------------------------------
-const upload = multer({ dest: "uploads/resumes/" });
+// Keep the uploaded resume in memory temporarily.
+// It will NOT be saved to the Render filesystem.
+const storage = multer.memoryStorage();
+
+const upload = multer({
+  storage,
+  limits: {
+    fileSize: 5 * 1024 * 1024 // 5 MB
+  }
+});
+
+
+// --------------------------------------------
+//  UPLOAD RESUME TO CLOUDINARY
+// --------------------------------------------
+const uploadResumeToCloudinary = (buffer, originalName) => {
+  return new Promise((resolve, reject) => {
+
+    const fileNameWithoutExtension = originalName
+      .replace(/\.[^/.]+$/, "")
+      .replace(/[^a-zA-Z0-9-_]/g, "_");
+
+    const uniquePublicId =
+      `${Date.now()}-${fileNameWithoutExtension}`;
+
+    const uploadStream = cloudinary.uploader.upload_stream(
+      {
+        folder: "talentiq/application-resumes",
+        resource_type: "raw",
+        public_id: uniquePublicId
+      },
+      (error, result) => {
+        if (error) {
+          reject(error);
+        } else {
+          resolve(result);
+        }
+      }
+    );
+
+    uploadStream.end(buffer);
+  });
+};
 
 
 // ------------------------------------------------------
-//  APPLY TO JOB  (NO TEST VALIDATION HERE ANYMORE)
+//  APPLY TO JOB
+//  (NO TEST VALIDATION HERE ANYMORE)
 // ------------------------------------------------------
 router.post(
   "/apply/:jobId",
@@ -29,17 +73,31 @@ router.post(
   authorizeRoles("candidate"),
   upload.single("resume"),
   async (req, res) => {
+
     try {
+
       const { jobId } = req.params;
       const { note } = req.body;
 
-      // 1️⃣ Validate Job
-      const job = await Job.findById(jobId);
-      if (!job)
-        return res.status(404).json({ message: "Job not found" });
 
+      // --------------------------------------------------
+      // 1️⃣ Validate Job
+      // --------------------------------------------------
+      const job = await Job.findById(jobId);
+
+      if (!job) {
+        return res.status(404).json({
+          message: "Job not found"
+        });
+      }
+
+
+      // --------------------------------------------------
       // 2️⃣ Validate Candidate Profile
-      const profile = await Candidate.findOne({ userId: req.user._id });
+      // --------------------------------------------------
+      const profile = await Candidate.findOne({
+        userId: req.user._id
+      });
 
       if (
         !profile ||
@@ -48,82 +106,171 @@ router.post(
         (!profile.resumeUrl && !profile.parsedData)
       ) {
         return res.status(400).json({
-          message: "Please complete your profile before applying.",
+          message: "Please complete your profile before applying."
         });
       }
 
+
       // --------------------------------------------------
-      // 3️⃣ RESUME PARSING — SAFE + FILE SIZE CHECK
+      // 3️⃣ RESUME PARSING + CLOUDINARY STORAGE
       // --------------------------------------------------
       let resumeUrl = null;
       let parsedResume = {};
 
+
       if (req.file) {
-        // 3.1 File size check (Max 5MB)
+
+        // ------------------------------------------------
+        // 3.1 File size check
+        // ------------------------------------------------
         if (req.file.size > 5 * 1024 * 1024) {
           return res.status(400).json({
-            message: "Resume must be under 5MB.",
+            message: "Resume must be under 5MB."
           });
         }
 
-        resumeUrl = `/uploads/resumes/${req.file.filename}`;
 
-        // 3.2 Send to Python parser (FastAPI)
+        // ------------------------------------------------
+        // 3.2 Upload resume to Cloudinary
+        // ------------------------------------------------
+        try {
+
+          const cloudinaryResult =
+            await uploadResumeToCloudinary(
+              req.file.buffer,
+              req.file.originalname
+            );
+
+          resumeUrl = cloudinaryResult.secure_url;
+
+          console.log(
+            "✅ Application resume uploaded to Cloudinary:",
+            resumeUrl
+          );
+
+        } catch (cloudinaryError) {
+
+          console.error(
+            "❌ Application resume Cloudinary upload failed:",
+            cloudinaryError
+          );
+
+          return res.status(500).json({
+            message: "Resume upload failed",
+            error:
+              cloudinaryError?.message ||
+              cloudinaryError
+          });
+        }
+
+
+        // ------------------------------------------------
+        // 3.3 Send same buffer to Python AI parser
+        // ------------------------------------------------
         const form = new FormData();
-        form.append("file", fs.createReadStream(req.file.path), {
+
+        form.append("file", req.file.buffer, {
           filename: req.file.originalname,
-          contentType: "application/pdf"
+          contentType: req.file.mimetype
         });
 
 
         try {
+
+          const aiServiceUrl =
+            process.env.AI_SERVICE_URL ||
+            "http://localhost:5000";
+
           const ai = await axios.post(
-            "http://localhost:5000/parse-resume",
+            `${aiServiceUrl}/parse-resume`,
             form,
-            { headers: form.getHeaders() }
+            {
+              headers: form.getHeaders()
+            }
           );
+
 
           parsedResume = {
             summary: ai.data.summary,
             extractedSkills: ai.data.extractedSkills,
-            keywords: [],
+            keywords: []
           };
 
         } catch (err) {
-          console.log("❌ Resume Parser Error:", err.response?.data || err);
+
+          console.log(
+            "❌ Resume Parser Error:",
+            err.response?.data ||
+            err.message ||
+            err
+          );
+
           return res.status(400).json({
-            message: "Resume parsing failed. Upload valid PDF under 5MB.",
+            message:
+              "Resume parsing failed. Upload valid PDF under 5MB."
           });
         }
       }
 
+
       // --------------------------------------------------
-      // 4️⃣ CREATE APPLICATION
+      // 4️⃣ CALCULATE FIT SCORE
       // --------------------------------------------------
-      const fitResult = calculateFitScore(job, profile, parsedResume);
-      const application = await Application.create({
-        job: jobId,
-        candidate: req.user._id,
-        note,
-        resumeUrl,
-        parsedResume,
-        // New Score addition
-        fitScore: fitResult.total,
-        fitBreakdown: fitResult.breakdown,
-        candidateSnapshot: {
-          education: profile.education,
-          skills: profile.skills,
-          experience: profile.experience,
-        },
+      const fitResult =
+        calculateFitScore(
+          job,
+          profile,
+          parsedResume
+        );
+
+
+      // --------------------------------------------------
+      // 5️⃣ CREATE APPLICATION
+      // --------------------------------------------------
+      const application =
+        await Application.create({
+
+          job: jobId,
+
+          candidate: req.user._id,
+
+          note,
+
+          resumeUrl,
+
+          parsedResume,
+
+          // New Score addition
+          fitScore: fitResult.total,
+
+          fitBreakdown: fitResult.breakdown,
+
+          candidateSnapshot: {
+            education: profile.education,
+            skills: profile.skills,
+            experience: profile.experience
+          }
+        });
+
+
+      // --------------------------------------------------
+      // 6️⃣ RESPONSE
+      // --------------------------------------------------
+      return res.json({
+        success: true,
+        application
       });
 
-      return res.json({ success: true, application });
-
     } catch (err) {
-      console.log("❌ APPLY ERROR:", err);
+
+      console.log(
+        "❌ APPLY ERROR:",
+        err
+      );
+
       return res.status(500).json({
         message: "Apply failed",
-        error: err.message,
+        error: err.message
       });
     }
   }
@@ -138,16 +285,28 @@ router.get(
   protect,
   authorizeRoles("candidate"),
   async (req, res) => {
+
     try {
-      const applications = await Application.find({ candidate: req.user._id })
-        .populate("job", "title location salary status")
-        .sort({ createdAt: -1 });
+
+      const applications =
+        await Application.find({
+          candidate: req.user._id
+        })
+        .populate(
+          "job",
+          "title location salary status"
+        )
+        .sort({
+          createdAt: -1
+        });
 
       res.json(applications);
+
     } catch (err) {
+
       res.status(500).json({
         message: "Error fetching applications",
-        error: err.message,
+        error: err.message
       });
     }
   }
@@ -162,16 +321,28 @@ router.get(
   protect,
   authorizeRoles("recruiter"),
   async (req, res) => {
+
     try {
-      const applications = await Application.find({ job: req.params.jobId })
-        .populate("candidate", "name email")
-        .sort({ createdAt: -1 });
+
+      const applications =
+        await Application.find({
+          job: req.params.jobId
+        })
+        .populate(
+          "candidate",
+          "name email"
+        )
+        .sort({
+          createdAt: -1
+        });
 
       res.json(applications);
+
     } catch (err) {
+
       res.status(500).json({
         message: "Error fetching applications",
-        error: err.message,
+        error: err.message
       });
     }
   }
@@ -186,58 +357,351 @@ router.put(
   protect,
   authorizeRoles("recruiter"),
   async (req, res) => {
+
     try {
-      const application = await Application.findById(req.params.id)
-        .populate("job");
 
-      if (!application)
-        return res.status(404).json({ message: "Application not found" });
+      const application =
+        await Application.findById(
+          req.params.id
+        ).populate("job");
 
-      application.status = req.body.status || application.status;
-      await application.save();
 
-      // ⭐ Auto Mail: If shortlisted
-      if (req.body.status === "shortlisted") {
-        await Message.create({
-          userId: application.candidate,
-          title: "🎉 You have been shortlisted!",
-          body: `Congratulations! You are shortlisted for the job: ${application.job.title}`,
+      if (!application) {
+        return res.status(404).json({
+          message: "Application not found"
         });
       }
 
+
+      application.status =
+        req.body.status ||
+        application.status;
+
+      await application.save();
+
+
+      // ⭐ Auto Mail: If shortlisted
+      if (
+        req.body.status === "shortlisted"
+      ) {
+
+        await Message.create({
+
+          userId: application.candidate,
+
+          title:
+            "🎉 You have been shortlisted!",
+
+          body:
+            `Congratulations! You are shortlisted for the job: ${application.job.title}`
+        });
+      }
+
+
       res.json({
+
         success: true,
-        message: "Application status updated",
-        application,
+
+        message:
+          "Application status updated",
+
+        application
       });
+
     } catch (err) {
+
       res.status(500).json({
-        message: "Failed to update status",
-        error: err.message,
+
+        message:
+          "Failed to update status",
+
+        error: err.message
       });
     }
   }
 );
 
-// GET SHORTLISTED APPLICATIONS BY JOB
+
+// ------------------------------------------------------
+//  GET SHORTLISTED APPLICATIONS BY JOB
+// ------------------------------------------------------
 router.get(
   "/job/:jobId/shortlisted",
   protect,
   authorizeRoles("recruiter"),
   async (req, res) => {
+
     try {
-      const apps = await Application.find({
-        job: req.params.jobId,
-        status: "shortlisted",
-      }).populate("candidate", "name email");
+
+      const apps =
+        await Application.find({
+
+          job: req.params.jobId,
+
+          status: "shortlisted"
+
+        }).populate(
+          "candidate",
+          "name email"
+        );
+
 
       res.json(apps);
+
     } catch (err) {
-      res.status(500).json({ message: "Failed to fetch shortlisted candidates" });
+
+      res.status(500).json({
+        message:
+          "Failed to fetch shortlisted candidates"
+      });
     }
   }
 );
 
 
-
 module.exports = router;
+
+
+
+
+// const express = require("express");
+// const router = express.Router();
+
+// const multer = require("multer");
+// const FormData = require("form-data");
+// const fs = require("fs");
+// const axios = require("axios");
+
+// const Application = require("../models/Application");
+// const Job = require("../models/Job");
+// const Candidate = require("../models/Candidate");
+// const Message = require("../models/Message");
+// const calculateFitScore = require("../utils/calculateFitScore")
+
+// const { protect, authorizeRoles } = require("../middleware/authMiddleware");
+
+// // --------------------------------------------
+// //  MULTER CONFIG
+// // --------------------------------------------
+// const upload = multer({ dest: "uploads/resumes/" });
+
+
+// // ------------------------------------------------------
+// //  APPLY TO JOB  (NO TEST VALIDATION HERE ANYMORE)
+// // ------------------------------------------------------
+// router.post(
+//   "/apply/:jobId",
+//   protect,
+//   authorizeRoles("candidate"),
+//   upload.single("resume"),
+//   async (req, res) => {
+//     try {
+//       const { jobId } = req.params;
+//       const { note } = req.body;
+
+//       // 1️⃣ Validate Job
+//       const job = await Job.findById(jobId);
+//       if (!job)
+//         return res.status(404).json({ message: "Job not found" });
+
+//       // 2️⃣ Validate Candidate Profile
+//       const profile = await Candidate.findOne({ userId: req.user._id });
+
+//       if (
+//         !profile ||
+//         profile.education.length === 0 ||
+//         profile.skills.length === 0 ||
+//         (!profile.resumeUrl && !profile.parsedData)
+//       ) {
+//         return res.status(400).json({
+//           message: "Please complete your profile before applying.",
+//         });
+//       }
+
+//       // --------------------------------------------------
+//       // 3️⃣ RESUME PARSING — SAFE + FILE SIZE CHECK
+//       // --------------------------------------------------
+//       let resumeUrl = null;
+//       let parsedResume = {};
+
+//       if (req.file) {
+//         // 3.1 File size check (Max 5MB)
+//         if (req.file.size > 5 * 1024 * 1024) {
+//           return res.status(400).json({
+//             message: "Resume must be under 5MB.",
+//           });
+//         }
+
+//         resumeUrl = `/uploads/resumes/${req.file.filename}`;
+
+//         // 3.2 Send to Python parser (FastAPI)
+//         const form = new FormData();
+//         form.append("file", fs.createReadStream(req.file.path), {
+//           filename: req.file.originalname,
+//           contentType: "application/pdf"
+//         });
+
+
+//         try {
+//           const ai = await axios.post(
+//             "http://localhost:5000/parse-resume",
+//             form,
+//             { headers: form.getHeaders() }
+//           );
+
+//           parsedResume = {
+//             summary: ai.data.summary,
+//             extractedSkills: ai.data.extractedSkills,
+//             keywords: [],
+//           };
+
+//         } catch (err) {
+//           console.log("❌ Resume Parser Error:", err.response?.data || err);
+//           return res.status(400).json({
+//             message: "Resume parsing failed. Upload valid PDF under 5MB.",
+//           });
+//         }
+//       }
+
+//       // --------------------------------------------------
+//       // 4️⃣ CREATE APPLICATION
+//       // --------------------------------------------------
+//       const fitResult = calculateFitScore(job, profile, parsedResume);
+//       const application = await Application.create({
+//         job: jobId,
+//         candidate: req.user._id,
+//         note,
+//         resumeUrl,
+//         parsedResume,
+//         // New Score addition
+//         fitScore: fitResult.total,
+//         fitBreakdown: fitResult.breakdown,
+//         candidateSnapshot: {
+//           education: profile.education,
+//           skills: profile.skills,
+//           experience: profile.experience,
+//         },
+//       });
+
+//       return res.json({ success: true, application });
+
+//     } catch (err) {
+//       console.log("❌ APPLY ERROR:", err);
+//       return res.status(500).json({
+//         message: "Apply failed",
+//         error: err.message,
+//       });
+//     }
+//   }
+// );
+
+
+// // ------------------------------------------------------
+// //  GET MY APPLICATIONS
+// // ------------------------------------------------------
+// router.get(
+//   "/my-applications",
+//   protect,
+//   authorizeRoles("candidate"),
+//   async (req, res) => {
+//     try {
+//       const applications = await Application.find({ candidate: req.user._id })
+//         .populate("job", "title location salary status")
+//         .sort({ createdAt: -1 });
+
+//       res.json(applications);
+//     } catch (err) {
+//       res.status(500).json({
+//         message: "Error fetching applications",
+//         error: err.message,
+//       });
+//     }
+//   }
+// );
+
+
+// // ------------------------------------------------------
+// //  RECRUITER → GET APPLICATIONS FOR A JOB
+// // ------------------------------------------------------
+// router.get(
+//   "/job/:jobId",
+//   protect,
+//   authorizeRoles("recruiter"),
+//   async (req, res) => {
+//     try {
+//       const applications = await Application.find({ job: req.params.jobId })
+//         .populate("candidate", "name email")
+//         .sort({ createdAt: -1 });
+
+//       res.json(applications);
+//     } catch (err) {
+//       res.status(500).json({
+//         message: "Error fetching applications",
+//         error: err.message,
+//       });
+//     }
+//   }
+// );
+
+
+// // ------------------------------------------------------
+// //  RECRUITER → UPDATE STATUS + AUTO MESSAGE
+// // ------------------------------------------------------
+// router.put(
+//   "/:id",
+//   protect,
+//   authorizeRoles("recruiter"),
+//   async (req, res) => {
+//     try {
+//       const application = await Application.findById(req.params.id)
+//         .populate("job");
+
+//       if (!application)
+//         return res.status(404).json({ message: "Application not found" });
+
+//       application.status = req.body.status || application.status;
+//       await application.save();
+
+//       // ⭐ Auto Mail: If shortlisted
+//       if (req.body.status === "shortlisted") {
+//         await Message.create({
+//           userId: application.candidate,
+//           title: "🎉 You have been shortlisted!",
+//           body: `Congratulations! You are shortlisted for the job: ${application.job.title}`,
+//         });
+//       }
+
+//       res.json({
+//         success: true,
+//         message: "Application status updated",
+//         application,
+//       });
+//     } catch (err) {
+//       res.status(500).json({
+//         message: "Failed to update status",
+//         error: err.message,
+//       });
+//     }
+//   }
+// );
+
+// // GET SHORTLISTED APPLICATIONS BY JOB
+// router.get(
+//   "/job/:jobId/shortlisted",
+//   protect,
+//   authorizeRoles("recruiter"),
+//   async (req, res) => {
+//     try {
+//       const apps = await Application.find({
+//         job: req.params.jobId,
+//         status: "shortlisted",
+//       }).populate("candidate", "name email");
+
+//       res.json(apps);
+//     } catch (err) {
+//       res.status(500).json({ message: "Failed to fetch shortlisted candidates" });
+//     }
+//   }
+// );
+
+// module.exports = router;
